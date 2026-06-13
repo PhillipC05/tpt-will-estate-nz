@@ -1,0 +1,7 @@
+﻿go 1.23
+
+use (
+  .
+  ./packages/realme-go
+  ./packages/nz-common
+)

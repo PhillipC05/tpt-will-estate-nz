@@ -1,0 +1,67 @@
+﻿version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tptnz
+      POSTGRES_PASSWORD: tptnz_dev
+      POSTGRES_DB: tptnz
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tptnz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+  app-will-estate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      DATABASE_URL: "postgres://tptnz:tptnz_dev@postgres:5432/tptnz?sslmode=disable"
+      REALME_ENVIRONMENT: "${REALME_ENVIRONMENT:-mts}"
+      REALME_CERT_FILE: "/certs/sp.crt"
+      REALME_KEY_FILE: "/certs/sp.key"
+      REALME_ENTITY_ID: "http://localhost:8083/auth/metadata"
+      REALME_ACS_URL: "http://localhost:8083/auth/callback"
+      REALME_IDP_METADATA_URL: "${REALME_IDP_METADATA_URL:-}"
+      BDM_WEBHOOK_SECRET: "${BDM_WEBHOOK_SECRET:-dev-secret}"
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+
+volumes:
+  postgres_data:

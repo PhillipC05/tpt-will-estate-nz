@@ -1,0 +1,54 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+go.sum
+
+# Certificates and keys — NEVER commit real certs
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+!testenv/fixtures/*.pem
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# pnpm
+.pnpm-store/
+
+# Build artefacts
+bin/
+tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Atlas
+atlas.hcl.local
