@@ -5,7 +5,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: tptnz
-      POSTGRES_PASSWORD: tptnz_dev
+      POSTGRES_PASSWORD: tptnz_dev   # Development only — set a strong password in production
       POSTGRES_DB: tptnz
     ports:
       - "5432:5432"

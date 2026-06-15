@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  go:
+    name: Go — test, lint, build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tptnz
+          POSTGRES_PASSWORD: tptnz_ci
+          POSTGRES_DB: tptnz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://tptnz:tptnz_ci@localhost:5432/tptnz?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install tools
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        run: golangci-lint run ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        run: go build ./cmd/server
+
+  frontend:
+    name: Frontend — type-check and lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Get pnpm store
+        id: pnpm-cache
+        run: echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: Cache pnpm
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store }}
+          key: pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm tsc --noEmit
+
+      - name: Build
+        run: pnpm build
