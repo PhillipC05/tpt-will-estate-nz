@@ -15,42 +15,42 @@ import (
 	"github.com/tpt-nz/realme-go"
 )
 
+// WillHandler handles all will lifecycle endpoints.
 type WillHandler struct {
-	willSvc *services.WillService
-	log     *slog.Logger
+	willSvc  *services.WillService
+	auditSvc *services.AuditService
+	log      *slog.Logger
 }
 
-func NewWillHandler(willSvc *services.WillService, log *slog.Logger) *WillHandler {
-	return &WillHandler{willSvc: willSvc, log: log.With("handler", "will")}
+func NewWillHandler(willSvc *services.WillService, auditSvc *services.AuditService, log *slog.Logger) *WillHandler {
+	return &WillHandler{willSvc: willSvc, auditSvc: auditSvc, log: log.With("handler", "will")}
 }
 
-// Create creates a draft will. The testator must hold a RealMe Verified Identity.
+// ── Core lifecycle ────────────────────────────────────────────────────────────
+
+// Create creates a new draft will. Existing active wills for the same testator
+// are automatically superseded (Wills Act 2007 s.17).
 func (h *WillHandler) Create(w http.ResponseWriter, r *http.Request) {
-	identity := realme.IdentityFromContext(r.Context())
+	identity := h.requireVerified(w, r)
 	if identity == nil {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-
 	var req services.CreateWillRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-
-	claims := identityClaims(identity)
-	id, err := h.willSvc.CreateDraft(r.Context(), claims, req)
+	id, err := h.willSvc.CreateDraft(r.Context(), identityClaims(identity), req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	respondJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
-// GetByID returns the will record for the authenticated testator or executor.
+// GetByID returns will metadata and vault ciphertext.
 func (h *WillHandler) GetByID(w http.ResponseWriter, r *http.Request) {
-	id := models.WillID(chi.URLParam(r, "id"))
+	id := willIDParam(r)
 	will, err := h.willSvc.GetByID(r.Context(), id)
 	if err != nil {
 		h.handleServiceErr(w, err)
@@ -61,13 +61,10 @@ func (h *WillHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 
 // SignTestator records the testator's digital signature over the will payload hash.
 func (h *WillHandler) SignTestator(w http.ResponseWriter, r *http.Request) {
-	identity := realme.IdentityFromContext(r.Context())
+	identity := h.requireVerified(w, r)
 	if identity == nil {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	id := models.WillID(chi.URLParam(r, "id"))
-
 	var req struct {
 		PayloadHash string `json:"payloadHash"`
 	}
@@ -75,8 +72,7 @@ func (h *WillHandler) SignTestator(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payloadHash required", http.StatusBadRequest)
 		return
 	}
-
-	if err := h.willSvc.SignTestator(r.Context(), id, identityClaims(identity), req.PayloadHash); err != nil {
+	if err := h.willSvc.SignTestator(r.Context(), willIDParam(r), identityClaims(identity), req.PayloadHash); err != nil {
 		h.handleServiceErr(w, err)
 		return
 	}
@@ -85,13 +81,10 @@ func (h *WillHandler) SignTestator(w http.ResponseWriter, r *http.Request) {
 
 // SignWitness records a witness's digital signature over the will payload hash.
 func (h *WillHandler) SignWitness(w http.ResponseWriter, r *http.Request) {
-	identity := realme.IdentityFromContext(r.Context())
+	identity := h.requireVerified(w, r)
 	if identity == nil {
-		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
-	id := models.WillID(chi.URLParam(r, "id"))
-
 	var req struct {
 		PayloadHash string `json:"payloadHash"`
 	}
@@ -99,8 +92,7 @@ func (h *WillHandler) SignWitness(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payloadHash required", http.StatusBadRequest)
 		return
 	}
-
-	if err := h.willSvc.SignWitness(r.Context(), id, identityClaims(identity), req.PayloadHash); err != nil {
+	if err := h.willSvc.SignWitness(r.Context(), willIDParam(r), identityClaims(identity), req.PayloadHash); err != nil {
 		h.handleServiceErr(w, err)
 		return
 	}
@@ -109,15 +101,132 @@ func (h *WillHandler) SignWitness(w http.ResponseWriter, r *http.Request) {
 
 // Lock finalises the will after two-witness signing is complete.
 func (h *WillHandler) Lock(w http.ResponseWriter, r *http.Request) {
-	id := models.WillID(chi.URLParam(r, "id"))
-	if err := h.willSvc.Lock(r.Context(), id, time.Now().UTC()); err != nil {
+	if err := h.willSvc.Lock(r.Context(), willIDParam(r), time.Now().UTC()); err != nil {
 		h.handleServiceErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// identityClaims maps a realme.Identity to the internal IdentityClaims model.
+// ── Feature 4: Codicil support ───────────────────────────────────────────────
+
+// CreateCodicil creates an amendment will attached to an existing locked will.
+// The parent will is NOT superseded; both remain active together.
+func (h *WillHandler) CreateCodicil(w http.ResponseWriter, r *http.Request) {
+	identity := h.requireVerified(w, r)
+	if identity == nil {
+		return
+	}
+	var req services.CreateWillRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	id, err := h.willSvc.CreateCodicil(r.Context(), willIDParam(r), identityClaims(identity), req)
+	if err != nil {
+		h.handleServiceErr(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, map[string]any{"id": id})
+}
+
+// ── Feature 2: Testator liveness check ───────────────────────────────────────
+
+// ConfirmLiveness records that the testator has confirmed the will is still
+// current. Resets the liveness reminder clock.
+func (h *WillHandler) ConfirmLiveness(w http.ResponseWriter, r *http.Request) {
+	identity := h.requireVerified(w, r)
+	if identity == nil {
+		return
+	}
+	if err := h.willSvc.ConfirmLiveness(r.Context(), willIDParam(r), identityClaims(identity)); err != nil {
+		h.handleServiceErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Feature 7: Digital asset clauses ─────────────────────────────────────────
+
+// AddDigitalAssetClause adds a digital-asset bequest to a draft will.
+func (h *WillHandler) AddDigitalAssetClause(w http.ResponseWriter, r *http.Request) {
+	identity := h.requireVerified(w, r)
+	if identity == nil {
+		return
+	}
+	var clause models.DigitalAssetClause
+	if err := json.NewDecoder(r.Body).Decode(&clause); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if clause.AssetType == "" || clause.Platform == "" || clause.Instruction == "" {
+		http.Error(w, "assetType, platform, and instruction are required", http.StatusBadRequest)
+		return
+	}
+	created, err := h.willSvc.AddDigitalAssetClause(r.Context(), willIDParam(r), identityClaims(identity), clause)
+	if err != nil {
+		h.handleServiceErr(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, created)
+}
+
+// ── Feature 8: LINZ property cross-reference ──────────────────────────────────
+
+// AddPropertyClause adds a real-property bequest, optionally verified with LINZ.
+func (h *WillHandler) AddPropertyClause(w http.ResponseWriter, r *http.Request) {
+	identity := h.requireVerified(w, r)
+	if identity == nil {
+		return
+	}
+	var req struct {
+		TitleReference string `json:"titleReference"`
+		BeneficiaryID  string `json:"beneficiaryId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TitleReference == "" {
+		http.Error(w, "titleReference required", http.StatusBadRequest)
+		return
+	}
+	clause, err := h.willSvc.AddPropertyClause(r.Context(), willIDParam(r), identityClaims(identity), req.TitleReference, req.BeneficiaryID)
+	if err != nil {
+		h.handleServiceErr(w, err)
+		return
+	}
+	respondJSON(w, http.StatusCreated, clause)
+}
+
+// ── Feature 6: Audit trail ────────────────────────────────────────────────────
+
+// GetAuditLog returns the hash-chained audit log for a will.
+// The chain integrity can be verified client-side by re-deriving each entry ID.
+func (h *WillHandler) GetAuditLog(w http.ResponseWriter, r *http.Request) {
+	id := willIDParam(r)
+	entries, err := h.auditSvc.GetByWillID(r.Context(), id)
+	if err != nil {
+		h.log.Error("get audit log", "err", err, "will_id", string(id))
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"willId":  string(id),
+		"entries": entries,
+	})
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+func (h *WillHandler) requireVerified(w http.ResponseWriter, r *http.Request) *realme.Identity {
+	identity := realme.IdentityFromContext(r.Context())
+	if identity == nil {
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+	}
+	return identity
+}
+
+func willIDParam(r *http.Request) models.WillID {
+	return models.WillID(chi.URLParam(r, "id"))
+}
+
 func identityClaims(id *realme.Identity) models.IdentityClaims {
 	return models.IdentityClaims{
 		RealMeFLT:      id.FLT,
@@ -134,7 +243,7 @@ func (h *WillHandler) handleServiceErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, services.ErrForbidden):
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, services.ErrInvalidState):
-		http.Error(w, "invalid state", http.StatusConflict)
+		http.Error(w, "invalid state for this operation", http.StatusConflict)
 	default:
 		h.log.Error("service error", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

@@ -1,6 +1,6 @@
 # app-will-estate — Digital Will & Estate Platform
 
-> **Legal disclaimer:** This service is not a substitute for legal advice. For complex estates, assets held in trust, or wills involving minors, consult a solicitor or contact [Public Trust](https://www.publictrust.co.nz/). Wills created through this service are intended to comply with the Wills Act 2007 and the Electronic Transactions Act 2002, but DIA / TPT NZ accept no liability for their legal validity.
+> **Legal disclaimer:** This service is not a substitute for legal advice. For complex estates, assets held in trust, or wills involving minors, consult a solicitor. Wills created through this service are intended to comply with the Wills Act 2007 and the Electronic Transactions Act 2002, but DIA / TPT NZ accept no liability for their legal validity.
 
 A secure digital will creation and estate administration platform using RealMe Verified Identity. Wills are encrypted client-side; the service cannot read the content of any will.
 

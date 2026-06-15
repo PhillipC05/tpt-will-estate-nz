@@ -15,6 +15,7 @@ import (
 	repo "github.com/tpt-nz/tpt-will-estate-nz/internal/repository"
 	svc "github.com/tpt-nz/tpt-will-estate-nz/internal/services"
 	nzmw "github.com/tpt-nz/nz-common/middleware"
+	"github.com/tpt-nz/nz-common/linz"
 	"github.com/tpt-nz/realme-go"
 )
 
@@ -44,15 +45,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Repositories
 	willRepo := repo.NewWillRepo(pool)
+	dalRepo := repo.NewDigitalAssetRepo(pool)
+	auditRepo := repo.NewAuditRepo(pool)
+
+	// Services
 	encSvc := svc.NewEncryptionService(logger)
-	willSvc := svc.NewWillService(willRepo, encSvc, logger)
+	auditSvc := svc.NewAuditService(auditRepo, logger)
+
+	// Optional LINZ title verification — enabled when LINZ_API_KEY is set.
+	var linzVerifier svc.PropertyVerifier
+	if apiKey := os.Getenv("LINZ_API_KEY"); apiKey != "" {
+		linzVerifier = svc.NewLINZPropertyVerifier(linz.NewClient(apiKey))
+		logger.Info("LINZ title verification enabled")
+	}
+
+	willSvc := svc.NewWillService(willRepo, dalRepo, encSvc, auditSvc, linzVerifier, logger)
 	deathTrigger := svc.NewDeathTrigger(willSvc, logger)
 
-	willHandler := handlers.NewWillHandler(willSvc, logger)
+	// Handlers
+	willHandler := handlers.NewWillHandler(willSvc, auditSvc, logger)
 	authHandler := handlers.NewAuthHandler(provider, logger)
 	executorHandler := handlers.NewExecutorHandler(willSvc, logger)
 	beneficiaryHandler := handlers.NewBeneficiaryHandler(willSvc, logger)
+	livenessHandler := handlers.NewLivenessHandler(willSvc, logger)
 
 	corsOrigins := strings.Fields(os.Getenv("CORS_ORIGINS"))
 	if len(corsOrigins) == 0 {
@@ -80,8 +97,33 @@ func main() {
 		rt.With(provider.RequireVerified()).Post("/{id}/sign/testator", willHandler.SignTestator)
 		rt.With(provider.RequireVerified()).Post("/{id}/sign/witness", willHandler.SignWitness)
 		rt.With(provider.RequireVerified()).Post("/{id}/lock", willHandler.Lock)
+
+		// Feature 4: Codicil
+		rt.With(provider.RequireVerified()).Post("/{id}/codicil", willHandler.CreateCodicil)
+
+		// Feature 2: Testator liveness confirmation (self-serve)
+		rt.With(provider.RequireVerified()).Post("/{id}/confirm", willHandler.ConfirmLiveness)
+
+		// Feature 7: Digital asset clauses
+		rt.With(provider.RequireVerified()).Post("/{id}/digital-asset-clauses", willHandler.AddDigitalAssetClause)
+
+		// Feature 8: LINZ property cross-reference
+		rt.With(provider.RequireVerified()).Post("/{id}/property-clauses", willHandler.AddPropertyClause)
+
+		// Feature 6: Hash-chained audit trail
+		rt.With(provider.RequireVerified()).Get("/{id}/audit", willHandler.GetAuditLog)
+
+		// Feature 1 + 5: Executor access (FLT verification + time-lock lazy unlock)
 		rt.With(provider.RequireVerified()).Get("/{id}/executor", executorHandler.GetWill)
+
 		rt.With(provider.RequireVerified()).Post("/{id}/beneficiaries/notify", beneficiaryHandler.NotifyAll)
+	})
+
+	// Feature 2: Liveness reminder — called by scheduler, not end users.
+	// Restrict to internal network or use a separate LISTEN_ADDR_INTERNAL in production.
+	r.Route("/internal/liveness", func(rt chi.Router) {
+		rt.Get("/check", livenessHandler.BulkCheckLiveness)
+		rt.Post("/wills/{id}/remind", livenessHandler.SendReminder)
 	})
 
 	// BDM death notification webhook (HMAC-SHA256 signed by BDM)

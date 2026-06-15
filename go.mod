@@ -1,4 +1,4 @@
-﻿module github.com/tpt-nz/tpt-will-estate-nz
+module github.com/tpt-nz/tpt-will-estate-nz
 
 go 1.23
 
